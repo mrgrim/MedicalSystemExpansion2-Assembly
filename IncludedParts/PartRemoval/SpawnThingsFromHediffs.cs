@@ -12,6 +12,11 @@ namespace MSE2.HarmonyPatches
 {
     internal static class MedicalRecipesUtility_SpawnThingsFromHediffs_Patch
     {
+        // This may be over generalizing it, but for mods that need to act on items spawned. See
+        // the VREA compatibility patch for how this is used.
+        public static readonly List<Func<Hediff, ThingDef>> compatPreFuncs = new();
+        public static List<Action<Thing, Hediff>> compatPostActions = new();
+        
         [HarmonyPatch( typeof( MedicalRecipesUtility ) )]
         [HarmonyPatch( nameof( MedicalRecipesUtility.SpawnThingsFromHediffs ) )]
         internal static class SpawnThingsFromHediffs
@@ -62,22 +67,32 @@ namespace MSE2.HarmonyPatches
 
             // for every thing makeable from hediffs on this part: add subparts if possible then return it
             List<Thing> items = new();
-            foreach ( ThingDef spawnableFromPart in from h in pawn.health.hediffSet.hediffs
-                                                    where h.def.spawnThingOnRemoved != null
-                                                    where h.Part == part
-                                                    select h.def.spawnThingOnRemoved ) // for every hediff on the part
+            foreach (Hediff hediff in pawn.health.hediffSet.hediffs)
             {
-                Thing item = ThingMaker.MakeThing( spawnableFromPart );
-
-                // compose if possible
-                CompIncludedChildParts comp = item.TryGetComp<CompIncludedChildParts>();
-                if ( comp != null )
+                // Any attempts to get clever here with LINQ or functional variants just results in extra allocations, so why bother?
+                if (hediff.Part == part && hediff.def.spawnThingOnRemoved is not null)
                 {
-                    comp.TargetVersion = comp.Props.SupportedVersions.Find( v => v.LimbConfigurations.Contains( LimbConfiguration.LimbConfigForBodyPartRecord( part ) ) );
-                    comp.InitializeFromList( subThings );
-                }
+                    ThingDef subThingDef = null;
+                    foreach (var func in compatPreFuncs)
+                        if ((subThingDef = func(hediff)) is not null)
+                            break;
+                    
+                    Thing item = ThingMaker.MakeThing(subThingDef ?? hediff.def.spawnThingOnRemoved);
 
-                items.Add( item );
+                    foreach (var action in compatPostActions)
+                        action( item, hediff );
+                    
+                    // compose if possible
+                    CompIncludedChildParts comp = item.TryGetComp<CompIncludedChildParts>();
+                    if (comp != null)
+                    {
+                        comp.TargetVersion = comp.Props.SupportedVersions.Find(v =>
+                            v.LimbConfigurations.Contains(LimbConfiguration.LimbConfigForBodyPartRecord(part)));
+                        comp.InitializeFromList(subThings);
+                    }
+
+                    items.Add(item);
+                }
             }
 
             // merge siblings
